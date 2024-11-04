@@ -3,9 +3,7 @@ from numpy.fft import fftshift, ifftn
 import unittest
 from eolelib import *
 import numpy as np
-import pandas as pd
-from io import StringIO
-
+import os
 
 
 class TestWindTurbulenceModels(unittest.TestCase):
@@ -132,6 +130,114 @@ class TestIntegrationCubature57(unittest.TestCase):
         
         result = integration_cubature57(f, R, 'weight.dat', x_c, y_c)
         self.assertAlmostEqual(result, expected_result, places=2)
+
+# Example turbine_parameters data for testing, including complex values
+example_data = [
+    {
+        'z_hub': 100.0,
+        'R_rotor': 40.0,
+        'K': 0.05,
+        'M': 1.0,
+        'FHS': 200.0,
+        'gamma': 0.01 + 0.005j,  # Complex value
+        'F_RHS': [0.1 + 0.02j, 0.2 + 0.03j, 0.3 + 0.04j],  # Array of complex values
+        'F_RHS_hat': [0.15, 0.25, 0.35],
+        'frequencies': [0.5, 1.0, 1.5],
+        'omega': [0.2, 0.4, 0.6],
+        'H_omega': [0.8 + 0.1j, 0.9 + 0.1j, 1.0 + 0.1j],  # Array of complex values
+        'x_hat': [1.1, 1.2, 1.3],
+        'x_temporal': [10.0 + 2.0j, 20.0 + 2.5j, 30.0 + 3.0j]  # Array of complex values
+    },
+    {
+        'z_hub': 120.0,
+        'R_rotor': 45.0,
+        'K': 0.06,
+        'M': 1.2,
+        'FHS': 220.0,
+        'gamma': 0.02 + 0.01j,  # Complex value
+        'F_RHS': [0.15 + 0.03j, 0.25 + 0.04j, 0.35 + 0.05j],  # Array of complex values
+        'F_RHS_hat': [0.18, 0.28, 0.38],
+        'frequencies': [0.6, 1.1, 1.6],
+        'omega': [0.3, 0.5, 0.7],
+        'H_omega': [0.85 + 0.15j, 0.95 + 0.15j, 1.05 + 0.15j],  # Array of complex values
+        'x_hat': [1.15, 1.25, 1.35],
+        'x_temporal': [15.0 + 3.5j, 25.0 + 4.0j, 35.0 + 4.5j]  # Array of complex values
+    }
+]
+
+class TestTurbineParameterNetCDF(unittest.TestCase):
+    def setUp(self):
+        """Set up a test NetCDF filename and ensure cleanup after each test."""
+        self.filename = "test_turbine_parameters.nc"
+        export_to_netcdf(example_data, self.filename)
+
+    def tearDown(self):
+        """Remove the test NetCDF file after tests run."""
+        if os.path.exists(self.filename):
+            os.remove(self.filename)
+
+    def test_file_creation(self):
+        """Test if the NetCDF file is created successfully."""
+        self.assertTrue(os.path.isfile(self.filename), "NetCDF file was not created.")
+
+    def test_data_integrity(self):
+        """Test if loaded data matches the original data, including complex numbers."""
+        loaded_data = load_from_netcdf(self.filename)
+
+        # Check overall structure
+        self.assertEqual(len(loaded_data), len(example_data), "Number of records does not match.")
+
+        # Check each record individually
+        for original, loaded in zip(example_data, loaded_data):
+            for key in original:
+                self.assertIn(key, loaded, f"Missing key '{key}' in loaded data.")
+                if isinstance(original[key], list):
+                    # Handle lists (arrays) that might contain complex numbers
+                    if np.iscomplexobj(original[key]):
+                        np.testing.assert_almost_equal(
+                            original[key], loaded[key],
+                            err_msg=f"Data mismatch in key '{key}' for complex array values."
+                        )
+                    else:
+                        np.testing.assert_almost_equal(
+                            original[key], loaded[key],
+                            err_msg=f"Data mismatch in key '{key}' for real array values."
+                        )
+                elif np.iscomplex(original[key]):
+                    # Handle complex scalar values
+                    self.assertAlmostEqual(
+                        np.real(original[key]), np.real(loaded[key]),
+                        msg=f"Data mismatch in key '{key}' for complex real part."
+                    )
+                    self.assertAlmostEqual(
+                        np.imag(original[key]), np.imag(loaded[key]),
+                        msg=f"Data mismatch in key '{key}' for complex imaginary part."
+                    )
+                else:
+                    # Handle real scalar values
+                    self.assertAlmostEqual(
+                        original[key], loaded[key],
+                        msg=f"Data mismatch in key '{key}' for scalar values."
+                    )
+
+    def test_max_psd_computation(self):
+        """Test if data from x_temporal can produce a valid PSD."""
+        from scipy.signal import welch
+
+        # Load data to get x_temporal
+        loaded_data = load_from_netcdf(self.filename)
+        for record in loaded_data:
+            # Ensure 'x_temporal' key exists
+            self.assertIn('x_temporal', record, "Missing key 'x_temporal' in loaded data.")
+            
+            x_temporal = np.array(record['x_temporal']) - np.mean(record['x_temporal'])
+            frequencies, psd = welch(np.real(x_temporal), fs=1.0)  # Assuming sampling frequency of 1 Hz
+
+            # Check if frequencies and psd are non-empty and valid
+            self.assertGreater(len(frequencies), 0, "Frequencies should not be empty.")
+            self.assertGreater(len(psd), 0, "PSD should not be empty.")
+            self.assertGreater(np.max(psd), 0, "PSD maximum should be greater than zero.")
+
 
 # If you're running the test manually via a script:
 if __name__ == '__main__':
