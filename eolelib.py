@@ -2,6 +2,8 @@ import numpy as np
 from numpy.fft import fftshift, ifftn
 import unittest
 import pandas as pd
+from netCDF4 import Dataset
+
 
 def UShear(z, z_ref=100, u_inf=10, model="powerlaw", z0=0.03):
     """
@@ -33,7 +35,7 @@ def UShear(z, z_ref=100, u_inf=10, model="powerlaw", z0=0.03):
         U_star = u_inf / (np.log(z_ref / z0) / kappa)  # Friction velocity
         return (U_star / kappa) * np.log(z / z0)
 
-def VonKarmanTurbulenceField(Lx, Ly, Lz, Nx, Ny, Nz, L):
+def VonKarmanTurbulenceField(Lx, Ly, Lz, Nx, Ny, Nz, L=35.4):
     """
     Generates a synthetic 3D turbulent velocity field using the Von Karman power spectrum.
 
@@ -43,7 +45,7 @@ def VonKarmanTurbulenceField(Lx, Ly, Lz, Nx, Ny, Nz, L):
     - Nx, Ny, Nz: int
         Number of grid points in the x, y, and z directions, respectively.
     - L: float
-        The characteristic length scale of turbulence (m).
+        The characteristic length scale of turbulence (m), Default L=35.4.
 
     Returns:
     - u, v, w: ndarray
@@ -202,3 +204,150 @@ def integration_cubature57(f, R, weights_file, x_c=0, y_c=0):
         result += w * f(x, y)
     
     return result
+
+    from netCDF4 import Dataset
+
+
+def export_to_netcdf(turbine_parameters, filename="turbine_parameters.nc"):
+    """
+    Export a list of turbine parameters to a NetCDF file, handling complex numbers by
+    saving real and imaginary parts separately.
+
+    Parameters:
+    - turbine_parameters (list of dict): List where each dictionary contains parameters for a turbine.
+    - filename (str): Name of the NetCDF file to save.
+
+    Complex values are stored as separate real and imaginary components.
+    """
+    with Dataset(filename, "w", format="NETCDF4") as nc_file:
+        num_turbines = len(turbine_parameters)
+        nc_file.createDimension("turbine", num_turbines)
+
+        # Determine scalar, array, and complex keys
+        scalar_keys = []
+        array_keys = []
+        complex_keys = []
+
+        for key, value in turbine_parameters[0].items():
+            if isinstance(value, (list, np.ndarray)):
+                array_keys.append(key)
+                if np.iscomplexobj(value):
+                    complex_keys.append(key)
+                    print(f"Detected complex array key for export: {key}")
+            elif np.iscomplex(value):
+                complex_keys.append(key)
+                print(f"Detected complex scalar key for export: {key}")
+            else:
+                scalar_keys.append(key)
+
+        # Define dimensions for array parameters
+        for key in array_keys:
+            length = len(turbine_parameters[0][key])
+            nc_file.createDimension(f"{key}_dim", length)
+
+        # Save scalar variables
+        for key in scalar_keys:
+            var = nc_file.createVariable(key, "f4", ("turbine",))
+            var[:] = [record[key] for record in turbine_parameters]
+
+        # Save array variables, splitting complex numbers into real and imaginary parts
+        for key in array_keys:
+            if key in complex_keys:
+                # Separate into real and imaginary components
+                var_real = nc_file.createVariable(f"{key}_real", "f4", ("turbine", f"{key}_dim"))
+                var_imag = nc_file.createVariable(f"{key}_imag", "f4", ("turbine", f"{key}_dim"))
+                var_real[:, :] = np.array([np.real(record[key]) for record in turbine_parameters])
+                var_imag[:, :] = np.array([np.imag(record[key]) for record in turbine_parameters])
+                print(f"Exported complex array key: {key}_real and {key}_imag")
+            else:
+                var = nc_file.createVariable(key, "f4", ("turbine", f"{key}_dim"))
+                var[:, :] = np.array([record[key] for record in turbine_parameters])
+
+        # Save scalar complex values
+        for key in complex_keys:
+            if key not in array_keys:
+                var_real = nc_file.createVariable(f"{key}_real", "f4", ("turbine",))
+                var_imag = nc_file.createVariable(f"{key}_imag", "f4", ("turbine",))
+                var_real[:] = [np.real(record[key]) for record in turbine_parameters]
+                var_imag[:] = [np.imag(record[key]) for record in turbine_parameters]
+                print(f"Exported complex scalar key: {key}_real and {key}_imag")
+
+        nc_file.description = "Turbine parameters dataset with complex values split into real and imaginary parts."
+
+
+def load_from_netcdf(filename="turbine_parameters.nc"):
+    """
+    Load turbine parameters from a NetCDF file into a list of dictionaries, reconstructing complex numbers.
+
+    Parameters:
+    - filename (str): Name of the NetCDF file to load.
+
+    Returns:
+    - list of dict: List where each dictionary contains parameters for a turbine.
+
+    Complex values are reconstructed from separate real and imaginary components.
+    """
+    turbine_parameters = []
+
+    with Dataset(filename, "r", format="NETCDF4") as nc_file:
+        scalar_keys = set()
+        array_keys = []
+        complex_keys = set()  # Using set to avoid duplicate entries
+        expected_keys = set()  # Track all expected keys for verification
+
+        # Identify scalar, array, and complex variables
+        for key in nc_file.variables:
+            if "_real" in key or "_imag" in key:
+                base_key = key.rsplit("_", 1)[0]
+                complex_keys.add(base_key)  # Avoid duplicates with set
+                scalar_keys.add(base_key)
+                expected_keys.add(f"{base_key}_real")
+                expected_keys.add(f"{base_key}_imag")
+                print(f"Detected complex key during load: {base_key}")
+            elif len(nc_file.variables[key].dimensions) == 1:
+                scalar_keys.add(key)
+                expected_keys.add(key)
+            else:
+                array_keys.append(key)
+                expected_keys.add(key)
+
+        # Check if all expected keys are in the file
+        missing_keys = expected_keys - set(nc_file.variables.keys())
+        if missing_keys:
+            print(f"Warning: Missing keys in NetCDF file: {missing_keys}")
+            # Raise an exception or handle missing keys as needed
+            raise KeyError(f"NetCDF file is missing expected keys: {missing_keys}")
+
+        # Construct each turbine's dictionary
+        for i in range(len(nc_file.dimensions["turbine"])):
+            turbine_data = {}
+            print(scalar_keys)
+            print(complex_keys)
+            print(array_keys)
+            for key in scalar_keys:
+                if key in complex_keys:
+                    # Reconstruct scalar complex number
+                    turbine_data[key] = complex(
+                        nc_file.variables[f"{key}_real"][i],
+                        nc_file.variables[f"{key}_imag"][i]
+                    )
+                    print(f"Reconstructed complex scalar key: {key}")
+                else:
+                    turbine_data[key] = nc_file.variables[key][i].item()
+
+            for key in array_keys:
+                if key in complex_keys:
+                    # Reconstruct array complex number
+                    real_part = np.array(nc_file.variables[f"{key}_real"][i, :])
+                    imag_part = np.array(nc_file.variables[f"{key}_imag"][i, :])
+                    turbine_data[key] = (real_part + 1j * imag_part).tolist()
+                    print(f"Reconstructed complex array key: {key}")
+                else:
+                    turbine_data[key] = nc_file.variables[key][i, :].tolist()
+            
+            # Debugging: Confirm all loaded keys for each turbine data
+            print(f"Loaded turbine data keys: {turbine_data.keys()}")
+                    
+            turbine_parameters.append(turbine_data)
+
+    return turbine_parameters
